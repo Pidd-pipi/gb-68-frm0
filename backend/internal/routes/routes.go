@@ -36,13 +36,15 @@ func SetupRoutes(r *gin.Engine) {
 			zones.POST("", zoneController.Create)
 			zones.PUT("/:id", zoneController.Update)
 			zones.DELETE("/:id", zoneController.Delete)
+			zones.GET("/:id/budget", zoneController.GetBudget)
+			zones.PUT("/:id/budget", zoneController.UpdateBudget)
 		}
 
 		devices := api.Group("/devices")
 		{
 			deviceController := controllers.NewDeviceController()
 			devices.POST("/:serial/heartbeat", deviceController.Heartbeat)
-			
+
 			protectedDevices := devices.Group("", middleware.JWTAuth())
 			{
 				protectedDevices.GET("", deviceController.List)
@@ -81,6 +83,7 @@ func SetupRoutes(r *gin.Engine) {
 		irrigation := api.Group("/irrigation", middleware.JWTAuth())
 		{
 			irrigationController := controllers.NewIrrigationController()
+			irrigation.POST("/check", irrigationController.CheckIrrigation)
 			irrigation.POST("/manual", irrigationController.ManualIrrigate)
 			irrigation.GET("/history", irrigationController.GetHistory)
 		}

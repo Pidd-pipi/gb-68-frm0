@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"errors"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
@@ -11,12 +12,14 @@ import (
 )
 
 type ZoneController struct {
-	zoneService *services.ZoneService
+	zoneService   *services.ZoneService
+	budgetService *services.BudgetService
 }
 
 func NewZoneController() *ZoneController {
 	return &ZoneController{
-		zoneService: services.NewZoneService(),
+		zoneService:   services.NewZoneService(),
+		budgetService: services.NewBudgetService(),
 	}
 }
 
@@ -94,7 +97,7 @@ func (c *ZoneController) Create(ctx *gin.Context) {
 // @Router /api/zones/{id} [put]
 func (c *ZoneController) Update(ctx *gin.Context) {
 	id, _ := strconv.ParseUint(ctx.Param("id"), 10, 32)
-	
+
 	var updates map[string]interface{}
 	if err := ctx.ShouldBindJSON(&updates); err != nil {
 		response.BadRequest(ctx, "Invalid request body")
@@ -120,11 +123,97 @@ func (c *ZoneController) Update(ctx *gin.Context) {
 // @Router /api/zones/{id} [delete]
 func (c *ZoneController) Delete(ctx *gin.Context) {
 	id, _ := strconv.ParseUint(ctx.Param("id"), 10, 32)
-	
+
 	if err := c.zoneService.DeleteZone(uint(id)); err != nil {
 		response.NotFound(ctx, err.Error())
 		return
 	}
 
 	response.Success(ctx, nil)
+}
+
+// GetBudget godoc
+// @Summary 获取区域每日水量限额
+// @Description 获取指定区域的每日水量限额、当天累计用水量与剩余额度；未设置限额时 daily_budget/remaining 为 null
+// @Tags 灌溉区域
+// @Security ApiKeyAuth
+// @Produce json
+// @Param id path int true "区域ID"
+// @Success 200 {object} services.ZoneBudgetStatus
+// @Router /api/zones/{id}/budget [get]
+func (c *ZoneController) GetBudget(ctx *gin.Context) {
+	id, _ := strconv.ParseUint(ctx.Param("id"), 10, 32)
+
+	status, err := c.budgetService.GetBudget(uint(id))
+	if err != nil {
+		if errors.Is(err, services.ErrZoneNotFound) {
+			response.NotFound(ctx, "Zone not found")
+			return
+		}
+		response.InternalServerError(ctx, err.Error())
+		return
+	}
+
+	response.Success(ctx, status)
+}
+
+// UpdateBudget godoc
+// @Summary 设置区域每日水量限额
+// @Description 设置指定区域的每日水量限额（升）；传 null 取消限额，区域恢复无限制运行
+// @Tags 灌溉区域
+// @Security ApiKeyAuth
+// @Accept json
+// @Produce json
+// @Param id path int true "区域ID"
+// @Param request body object true "限额设置，如 {\"daily_water_budget\": 500}"
+// @Success 200 {object} services.ZoneBudgetStatus
+// @Failure 400 {object} response.Response
+// @Router /api/zones/{id}/budget [put]
+func (c *ZoneController) UpdateBudget(ctx *gin.Context) {
+	id, _ := strconv.ParseUint(ctx.Param("id"), 10, 32)
+
+	var body map[string]interface{}
+	if err := ctx.ShouldBindJSON(&body); err != nil {
+		response.BadRequest(ctx, "Invalid request body")
+		return
+	}
+
+	value, exists := body["daily_water_budget"]
+	if !exists {
+		response.BadRequest(ctx, "daily_water_budget is required")
+		return
+	}
+
+	// 显式传 null 表示取消限额
+	if value == nil {
+		status, err := c.budgetService.SetBudget(uint(id), nil)
+		if err != nil {
+			if errors.Is(err, services.ErrZoneNotFound) {
+				response.NotFound(ctx, "Zone not found")
+				return
+			}
+			response.InternalServerError(ctx, err.Error())
+			return
+		}
+		response.Success(ctx, status)
+		return
+	}
+
+	budget, ok := value.(float64)
+	if !ok || budget < 0 {
+		response.BadRequest(ctx, "daily_water_budget must be a non-negative number")
+		return
+	}
+
+	status, err := c.budgetService.SetBudget(uint(id), &budget)
+	if err != nil {
+		if errors.Is(err, services.ErrZoneNotFound) {
+			response.NotFound(ctx, "Zone not found")
+			return
+		}
+		response.InternalServerError(ctx, err.Error())
+		return
+	}
+
+	response.Success(ctx, status)
 }

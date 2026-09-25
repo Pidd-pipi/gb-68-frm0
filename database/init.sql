@@ -5,9 +5,13 @@ CREATE TABLE IF NOT EXISTS irrigation_zones (
     id SERIAL PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
     description TEXT,
+    daily_water_budget DECIMAL(12, 2),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- 兼容已存在的库：补充每日水量限额列（NULL 表示未设置限额，照旧运行）
+ALTER TABLE irrigation_zones ADD COLUMN IF NOT EXISTS daily_water_budget DECIMAL(12, 2);
 
 -- 设备类型枚举
 CREATE TYPE device_type AS ENUM ('valve', 'pump', 'soil_sensor', 'rain_sensor', 'temp_sensor');
@@ -87,6 +91,11 @@ CREATE TABLE IF NOT EXISTS irrigation_logs (
 -- 创建索引
 CREATE INDEX IF NOT EXISTS idx_irrigation_logs_zone_time ON irrigation_logs(zone_id, start_time);
 CREATE INDEX IF NOT EXISTS idx_irrigation_logs_time ON irrigation_logs(start_time);
+
+-- 同一区域同一时刻只允许存在一个进行中的灌溉任务（NULL zone_id 不受约束）
+CREATE UNIQUE INDEX IF NOT EXISTS uq_irrigation_logs_zone_in_progress
+    ON irrigation_logs(zone_id)
+    WHERE status = 'in_progress' AND zone_id IS NOT NULL;
 
 -- 告警类型枚举
 CREATE TYPE alert_type AS ENUM ('device_offline', 'sensor_abnormal', 'irrigation_failed');

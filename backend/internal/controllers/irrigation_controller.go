@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"errors"
 	"strconv"
 	"time"
 
@@ -13,27 +14,32 @@ import (
 
 type IrrigationController struct {
 	irrigationService *services.IrrigationService
+	budgetService     *services.BudgetService
 }
 
 func NewIrrigationController() *IrrigationController {
 	return &IrrigationController{
 		irrigationService: services.NewIrrigationService(),
+		budgetService:     services.NewBudgetService(),
 	}
 }
 
-// ManualIrrigate godoc
-// @Summary 手动灌溉
-// @Description 触发手动灌溉
+// CheckIrrigation godoc
+// @Summary 灌溉前检查
+// @Description 在计划或手动灌溉启动前，检查当天累计用水量与本次估算量。超出每日限额或同区域已有进行中任务时返回 409（含 reason 和 remaining）；未设置限额的区域始终放行
 // @Tags 灌溉执行
 // @Security ApiKeyAuth
 // @Accept json
 // @Produce json
-// @Param zone_id body int true "区域ID"
-// @Success 200 {object} models.IrrigationLog
-// @Router /api/irrigation/manual [post]
-func (c *IrrigationController) ManualIrrigate(ctx *gin.Context) {
+// @Param request body object true "检查参数，如 {\"zone_id\": 1, \"duration\": 600} 或 {\"zone_id\": 1, \"estimated_usage\": 60}"
+// @Success 200 {object} services.CheckResult
+// @Failure 409 {object} response.Response
+// @Router /api/irrigation/check [post]
+func (c *IrrigationController) CheckIrrigation(ctx *gin.Context) {
 	var req struct {
-		ZoneID uint `json:"zone_id" binding:"required"`
+		ZoneID         uint     `json:"zone_id" binding:"required"`
+		Duration       *int     `json:"duration"`
+		EstimatedUsage *float64 `json:"estimated_usage"`
 	}
 
 	if err := ctx.ShouldBindJSON(&req); err != nil {
@@ -41,12 +47,81 @@ func (c *IrrigationController) ManualIrrigate(ctx *gin.Context) {
 		return
 	}
 
-	log, err := c.irrigationService.StartIrrigation(nil, &req.ZoneID, models.TriggerTypeManual)
+	estimated := 0.0
+	if req.EstimatedUsage != nil {
+		estimated = *req.EstimatedUsage
+	} else if req.Duration != nil {
+		estimated = services.EstimateWaterUsage(*req.Duration)
+	}
+
+	result, err := c.budgetService.CheckIrrigation(req.ZoneID, estimated)
 	if err != nil {
+		var conflict *services.ConflictError
+		if errors.As(err, &conflict) {
+			response.Conflict(ctx, conflict.Error(), gin.H{
+				"reason":      conflict.Reason,
+				"remaining":   conflict.Remaining,
+				"used_today":  result.UsedToday,
+				"estimated":   estimated,
+				"in_progress": result.InProgress,
+			})
+			return
+		}
+		if errors.Is(err, services.ErrZoneNotFound) {
+			response.NotFound(ctx, "Zone not found")
+			return
+		}
 		response.InternalServerError(ctx, err.Error())
 		return
 	}
 
+	response.Success(ctx, result)
+}
+
+// ManualIrrigate godoc
+// @Summary 手动灌溉
+// @Description 触发手动灌溉，启动前检查每日水量限额及同区域进行中任务
+// @Tags 灌溉执行
+// @Security ApiKeyAuth
+// @Accept json
+// @Produce json
+// @Param request body object true "手动灌溉请求，如 {\"zone_id\": 1, \"duration\": 600}"
+// @Success 200 {object} models.IrrigationLog
+// @Failure 409 {object} response.Response
+// @Router /api/irrigation/manual [post]
+func (c *IrrigationController) ManualIrrigate(ctx *gin.Context) {
+	var req struct {
+		ZoneID         uint     `json:"zone_id" binding:"required"`
+		Duration       *int     `json:"duration"`
+		EstimatedUsage *float64 `json:"estimated_usage"`
+	}
+
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(ctx, "Invalid request body")
+		return
+	}
+
+	opts := &services.StartIrrigationOptions{}
+	if req.EstimatedUsage != nil {
+		opts.EstimatedUsage = *req.EstimatedUsage
+	}
+	if req.Duration != nil {
+		opts.DurationSeconds = *req.Duration
+	}
+
+	log, err := c.irrigationService.StartIrrigation(nil, &req.ZoneID, models.TriggerTypeManual, opts)
+	if err != nil {
+		var conflict *services.ConflictError
+		if errors.As(err, &conflict) {
+			response.Conflict(ctx, conflict.Error(), gin.H{
+				"reason":    conflict.Reason,
+				"remaining": conflict.Remaining,
+			})
+			return
+		}
+		response.InternalServerError(ctx, err.Error())
+		return
+	}
 	response.Success(ctx, log)
 }
 

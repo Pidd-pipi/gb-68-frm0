@@ -7,14 +7,29 @@ import (
 	"irrigation/pkg/database"
 )
 
-type IrrigationService struct{}
-
-func NewIrrigationService() *IrrigationService {
-	return &IrrigationService{}
+type IrrigationService struct {
+	budgetService *BudgetService
 }
 
-func (s *IrrigationService) StartIrrigation(scheduleID *uint, zoneID *uint, triggerType models.TriggerType) (*models.IrrigationLog, error) {
-	log := &models.IrrigationLog{
+func NewIrrigationService() *IrrigationService {
+	return &IrrigationService{
+		budgetService: NewBudgetService(),
+	}
+}
+
+// StartIrrigationOptions 启动灌溉时的可选参数
+type StartIrrigationOptions struct {
+	// EstimatedUsage 本次灌溉的预估用水量（升），> 0 时优先使用
+	EstimatedUsage float64
+	// DurationSeconds 本次灌溉预计时长（秒），未显式给估算量时按时长估算
+	DurationSeconds int
+}
+
+// StartIrrigation 启动灌溉。启动前统一走每日限额与同区域进行中任务检查：
+// 超出每日限额或同区域已有进行中任务时返回 *ConflictError；
+// 没有区域（zoneID 为 nil）或区域未设置限额时照旧运行。
+func (s *IrrigationService) StartIrrigation(scheduleID *uint, zoneID *uint, triggerType models.TriggerType, opts *StartIrrigationOptions) (*models.IrrigationLog, error) {
+	logEntry := &models.IrrigationLog{
 		ScheduleID:  scheduleID,
 		ZoneID:      zoneID,
 		TriggerType: triggerType,
@@ -22,11 +37,26 @@ func (s *IrrigationService) StartIrrigation(scheduleID *uint, zoneID *uint, trig
 		Status:      models.ExecutionStatusInProgress,
 	}
 
-	if err := database.DB.Create(log).Error; err != nil {
-		return nil, err
+	// 未绑定区域的灌溉任务不做区域级限额/冲突检查，保持原有行为
+	if zoneID == nil {
+		if err := database.DB.Create(logEntry).Error; err != nil {
+			return nil, err
+		}
+		return logEntry, nil
 	}
 
-	return log, nil
+	estimated := 0.0
+	if opts != nil {
+		estimated = opts.EstimatedUsage
+		if estimated <= 0 {
+			estimated = EstimateWaterUsage(opts.DurationSeconds)
+		}
+	}
+
+	if _, err := s.budgetService.CheckAndStartIrrigation(logEntry, estimated); err != nil {
+		return nil, err
+	}
+	return logEntry, nil
 }
 
 func (s *IrrigationService) CompleteIrrigation(logID uint, success bool, waterUsage *float64, errorMsg *string) error {
@@ -78,9 +108,9 @@ func (s *IrrigationService) GetIrrigationHistory(zoneID *uint, startTime, endTim
 }
 
 type WaterUsageStats struct {
-	TotalUsage   float64 `json:"total_usage"`
-	Duration     int64   `json:"duration"`
-	IrrigationCount int64 `json:"irrigation_count"`
+	TotalUsage      float64 `json:"total_usage"`
+	Duration        int64   `json:"duration"`
+	IrrigationCount int64   `json:"irrigation_count"`
 }
 
 func (s *IrrigationService) GetWaterUsageStats(zoneID *uint, startTime, endTime time.Time) (*WaterUsageStats, error) {
@@ -112,21 +142,21 @@ type ZoneWaterUsage struct {
 
 func (s *IrrigationService) GetZoneWaterUsage(startTime, endTime time.Time) ([]ZoneWaterUsage, error) {
 	var zoneUsages []ZoneWaterUsage
-	
+
 	query := `
-		SELECT 
+		SELECT
 			z.id as zone_id,
 			z.name as zone_name,
 			COALESCE(SUM(il.water_usage), 0) as water_usage
 		FROM irrigation_zones z
-		LEFT JOIN irrigation_logs il ON z.id = il.zone_id 
+		LEFT JOIN irrigation_logs il ON z.id = il.zone_id
 			AND il.status = 'success'
-			AND il.start_time >= ? 
+			AND il.start_time >= ?
 			AND il.start_time <= ?
 		GROUP BY z.id, z.name
 		ORDER BY water_usage DESC
 	`
-	
+
 	err := database.DB.Raw(query, startTime, endTime).Scan(&zoneUsages).Error
 	if err != nil {
 		return nil, err

@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"errors"
 	"time"
 
 	"go.uber.org/zap"
@@ -11,20 +12,20 @@ import (
 )
 
 type IrrigationScheduler struct {
-	scheduleService  *services.ScheduleService
+	scheduleService   *services.ScheduleService
 	irrigationService *services.IrrigationService
-	sensorService   *services.SensorService
-	deviceService  *services.DeviceService
-	alertService   *services.AlertService
+	sensorService     *services.SensorService
+	deviceService     *services.DeviceService
+	alertService      *services.AlertService
 }
 
 func NewIrrigationScheduler() *IrrigationScheduler {
 	return &IrrigationScheduler{
-		scheduleService:  services.NewScheduleService(),
+		scheduleService:   services.NewScheduleService(),
 		irrigationService: services.NewIrrigationService(),
-		sensorService:   services.NewSensorService(),
-		deviceService:  services.NewDeviceService(),
-		alertService:   services.NewAlertService(),
+		sensorService:     services.NewSensorService(),
+		deviceService:     services.NewDeviceService(),
+		alertService:      services.NewAlertService(),
 	}
 }
 
@@ -134,8 +135,23 @@ func (s *IrrigationScheduler) executeIrrigation(schedule models.IrrigationSchedu
 		triggerType = models.TriggerTypeConditional
 	}
 
-	log, err := s.irrigationService.StartIrrigation(&schedule.ID, schedule.ZoneID, triggerType)
+	log, err := s.irrigationService.StartIrrigation(&schedule.ID, schedule.ZoneID, triggerType, &services.StartIrrigationOptions{
+		DurationSeconds: schedule.Duration,
+	})
 	if err != nil {
+		var conflict *services.ConflictError
+		if errors.As(err, &conflict) {
+			// 限额超限或同区域已有进行中任务：本次跳过，不产生失败告警
+			fields := []zap.Field{
+				zap.Uint("schedule_id", schedule.ID),
+				zap.String("reason", conflict.Reason),
+			}
+			if conflict.Remaining != nil {
+				fields = append(fields, zap.Float64("remaining", *conflict.Remaining))
+			}
+			logger.Info("Skipping scheduled irrigation due to conflict", fields...)
+			return
+		}
 		logger.Error("Failed to start irrigation", zap.Error(err))
 		s.alertService.CreateIrrigationFailedAlert(schedule.ZoneID, "启动灌溉失败: "+err.Error())
 		return
@@ -145,7 +161,7 @@ func (s *IrrigationScheduler) executeIrrigation(schedule models.IrrigationSchedu
 	if schedule.Duration > 0 {
 		time.Sleep(duration)
 
-		waterUsage := float64(schedule.Duration) * 0.1
+		waterUsage := services.EstimateWaterUsage(schedule.Duration)
 		s.irrigationService.CompleteIrrigation(log.ID, true, &waterUsage, nil)
 		logger.Info("Irrigation completed", zap.Uint("log_id", log.ID))
 	} else {
