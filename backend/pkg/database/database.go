@@ -42,6 +42,19 @@ func Init() error {
 	sqlDB.SetMaxOpenConns(100)
 	sqlDB.SetConnMaxLifetime(time.Hour)
 
+	if err := migrate(); err != nil {
+		applogger.Error("Failed to run database migrations", zap.Error(err))
+		return err
+	}
+
 	applogger.Info("Database connected successfully")
 	return nil
+}
+
+// migrate 执行幂等的 schema 变更，兼容已有部署（init.sql 仅在全新数据库上执行）
+func migrate() error {
+	return DB.Exec(`
+		ALTER TABLE irrigation_zones
+		ADD COLUMN IF NOT EXISTS daily_water_budget DECIMAL(10,2)
+	`).Error
 }

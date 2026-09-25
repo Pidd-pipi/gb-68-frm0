@@ -120,11 +120,73 @@ func (c *ZoneController) Update(ctx *gin.Context) {
 // @Router /api/zones/{id} [delete]
 func (c *ZoneController) Delete(ctx *gin.Context) {
 	id, _ := strconv.ParseUint(ctx.Param("id"), 10, 32)
-	
+
 	if err := c.zoneService.DeleteZone(uint(id)); err != nil {
 		response.NotFound(ctx, err.Error())
 		return
 	}
 
 	response.Success(ctx, nil)
+}
+
+// GetBudget godoc
+// @Summary 获取区域每日水量限额
+// @Description 获取区域每日水量限额及当天累计用水、剩余额度
+// @Tags 灌溉区域
+// @Security ApiKeyAuth
+// @Produce json
+// @Param id path int true "区域ID"
+// @Success 200 {object} services.ZoneBudgetStatus
+// @Failure 404 {object} response.Response
+// @Router /api/zones/{id}/budget [get]
+func (c *ZoneController) GetBudget(ctx *gin.Context) {
+	id, _ := strconv.ParseUint(ctx.Param("id"), 10, 32)
+
+	status, err := c.zoneService.GetZoneBudgetStatus(uint(id))
+	if err != nil {
+		response.NotFound(ctx, err.Error())
+		return
+	}
+
+	response.Success(ctx, status)
+}
+
+// SetBudget godoc
+// @Summary 设置区域每日水量限额
+// @Description 设置区域每日水量限额，传 null 清除限额
+// @Tags 灌溉区域
+// @Security ApiKeyAuth
+// @Accept json
+// @Produce json
+// @Param id path int true "区域ID"
+// @Param request body services.SetBudgetRequest true "每日水量限额（升）"
+// @Success 200 {object} services.ZoneBudgetStatus
+// @Failure 400 {object} response.Response
+// @Failure 404 {object} response.Response
+// @Router /api/zones/{id}/budget [put]
+func (c *ZoneController) SetBudget(ctx *gin.Context) {
+	id, _ := strconv.ParseUint(ctx.Param("id"), 10, 32)
+
+	var req services.SetBudgetRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(ctx, "Invalid request body")
+		return
+	}
+	if req.DailyWaterBudget != nil && *req.DailyWaterBudget < 0 {
+		response.BadRequest(ctx, "daily_water_budget must be non-negative")
+		return
+	}
+
+	if err := c.zoneService.SetZoneBudget(uint(id), req.DailyWaterBudget); err != nil {
+		response.NotFound(ctx, err.Error())
+		return
+	}
+
+	status, err := c.zoneService.GetZoneBudgetStatus(uint(id))
+	if err != nil {
+		response.InternalServerError(ctx, err.Error())
+		return
+	}
+
+	response.Success(ctx, status)
 }

@@ -5,6 +5,8 @@ CREATE TABLE IF NOT EXISTS irrigation_zones (
     id SERIAL PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
     description TEXT,
+    -- 每日水量限额（升），NULL 表示不限制
+    daily_water_budget DECIMAL(10, 2),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

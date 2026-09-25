@@ -51,6 +51,15 @@ func NotFound(c *gin.Context, message string) {
 	Error(c, http.StatusNotFound, message)
 }
 
+// Conflict 返回 409，并携带冲突详情（如 reason、remaining）
+func Conflict(c *gin.Context, message string, data interface{}) {
+	c.JSON(http.StatusConflict, Response{
+		Code:    http.StatusConflict,
+		Message: message,
+		Data:    data,
+	})
+}
+
 func InternalServerError(c *gin.Context, message string) {
 	Error(c, http.StatusInternalServerError, message)
 }

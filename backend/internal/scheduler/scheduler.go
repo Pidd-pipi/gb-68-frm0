@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"errors"
 	"time"
 
 	"go.uber.org/zap"
@@ -134,8 +135,32 @@ func (s *IrrigationScheduler) executeIrrigation(schedule models.IrrigationSchedu
 		triggerType = models.TriggerTypeConditional
 	}
 
-	log, err := s.irrigationService.StartIrrigation(&schedule.ID, schedule.ZoneID, triggerType)
+	// 与手动灌溉相同的启动前判断：区域限额 + 进行中任务冲突。
+	// 检查与创建任务在同一事务内完成，同一时刻同区域只会启动一个任务。
+	var estimatedUsage float64
+	if schedule.ZoneID != nil && schedule.Duration > 0 {
+		estimatedUsage = float64(schedule.Duration) * 0.1
+	}
+
+	log, err := s.irrigationService.StartIrrigationChecked(&schedule.ID, schedule.ZoneID, triggerType, estimatedUsage)
 	if err != nil {
+		var conflictErr *services.CheckConflictError
+		if errors.As(err, &conflictErr) {
+			logger.Warn("Irrigation skipped by pre-check",
+				zap.Uint("schedule_id", schedule.ID),
+				zap.Any("zone_id", schedule.ZoneID),
+				zap.String("reason", conflictErr.Result.Reason),
+			)
+			s.alertService.CreateIrrigationFailedAlert(schedule.ZoneID,
+				"灌溉计划被启动前检查拦截: "+conflictErr.Result.Reason)
+			return
+		}
+		if errors.Is(err, services.ErrZoneNotFound) {
+			logger.Warn("Irrigation skipped: zone not found",
+				zap.Uint("schedule_id", schedule.ID),
+				zap.Any("zone_id", schedule.ZoneID))
+			return
+		}
 		logger.Error("Failed to start irrigation", zap.Error(err))
 		s.alertService.CreateIrrigationFailedAlert(schedule.ZoneID, "启动灌溉失败: "+err.Error())
 		return

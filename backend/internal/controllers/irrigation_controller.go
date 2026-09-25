@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"errors"
 	"strconv"
 	"time"
 
@@ -21,6 +22,43 @@ func NewIrrigationController() *IrrigationController {
 	}
 }
 
+// CheckIrrigation godoc
+// @Summary 灌溉前检查
+// @Description 在计划或手动灌溉启动前检查当天累计用水和本次估算量，超出区域每日限额或同区域已有进行中任务时返回 409
+// @Tags 灌溉执行
+// @Security ApiKeyAuth
+// @Accept json
+// @Produce json
+// @Param request body services.CheckIrrigationRequest true "检查参数"
+// @Success 200 {object} services.IrrigationCheckResult
+// @Failure 404 {object} response.Response
+// @Failure 409 {object} response.Response
+// @Router /api/irrigation/check [post]
+func (c *IrrigationController) Check(ctx *gin.Context) {
+	var req services.CheckIrrigationRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(ctx, "Invalid request body")
+		return
+	}
+	if req.EstimatedUsage < 0 {
+		response.BadRequest(ctx, "estimated_usage must be non-negative")
+		return
+	}
+
+	result, err := c.irrigationService.CheckIrrigation(req.ZoneID, req.EstimatedUsage)
+	if err != nil {
+		c.handleIrrigationError(ctx, err)
+		return
+	}
+
+	if !result.Allowed {
+		c.sendConflict(ctx, result)
+		return
+	}
+
+	response.Success(ctx, result)
+}
+
 // ManualIrrigate godoc
 // @Summary 手动灌溉
 // @Description 触发手动灌溉
@@ -28,26 +66,59 @@ func NewIrrigationController() *IrrigationController {
 // @Security ApiKeyAuth
 // @Accept json
 // @Produce json
-// @Param zone_id body int true "区域ID"
+// @Param request body services.ManualIrrigationRequest true "手动灌溉参数"
 // @Success 200 {object} models.IrrigationLog
+// @Failure 409 {object} response.Response
 // @Router /api/irrigation/manual [post]
 func (c *IrrigationController) ManualIrrigate(ctx *gin.Context) {
-	var req struct {
-		ZoneID uint `json:"zone_id" binding:"required"`
-	}
+	var req services.ManualIrrigationRequest
 
 	if err := ctx.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(ctx, "Invalid request body")
 		return
 	}
+	if req.EstimatedUsage != nil && *req.EstimatedUsage < 0 {
+		response.BadRequest(ctx, "estimated_usage must be non-negative")
+		return
+	}
 
-	log, err := c.irrigationService.StartIrrigation(nil, &req.ZoneID, models.TriggerTypeManual)
+	estimated := 0.0
+	if req.EstimatedUsage != nil {
+		estimated = *req.EstimatedUsage
+	}
+
+	// 检查与创建进行中任务在同一事务内完成（区域 advisory lock），
+	// 保证限额判断和并发启动的原子性
+	log, err := c.irrigationService.StartIrrigationChecked(nil, &req.ZoneID, models.TriggerTypeManual, estimated)
 	if err != nil {
-		response.InternalServerError(ctx, err.Error())
+		c.handleIrrigationError(ctx, err)
 		return
 	}
 
 	response.Success(ctx, log)
+}
+
+// handleIrrigationError 将服务层错误映射为合适的 HTTP 响应
+func (c *IrrigationController) handleIrrigationError(ctx *gin.Context, err error) {
+	var conflictErr *services.CheckConflictError
+	if errors.As(err, &conflictErr) {
+		c.sendConflict(ctx, conflictErr.Result)
+		return
+	}
+	if errors.Is(err, services.ErrZoneNotFound) {
+		response.NotFound(ctx, "Zone not found")
+		return
+	}
+	response.InternalServerError(ctx, err.Error())
+}
+
+func (c *IrrigationController) sendConflict(ctx *gin.Context, result *services.IrrigationCheckResult) {
+	response.Conflict(ctx, "Irrigation not allowed: "+result.Reason, gin.H{
+		"reason":          result.Reason,
+		"remaining":       result.Remaining,
+		"used_today":      result.UsedToday,
+		"estimated_usage": result.EstimatedUsage,
+	})
 }
 
 // GetIrrigationHistory godoc

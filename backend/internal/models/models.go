@@ -25,13 +25,14 @@ const (
 )
 
 type IrrigationZone struct {
-	ID          uint           `json:"id" gorm:"primaryKey"`
-	Name        string         `json:"name" gorm:"size:100;not null"`
-	Description string         `json:"description" gorm:"type:text"`
-	CreatedAt   time.Time      `json:"created_at"`
-	UpdatedAt   time.Time      `json:"updated_at"`
-	DeletedAt   gorm.DeletedAt `json:"-" gorm:"index"`
-	Devices     []Device       `json:"devices,omitempty" gorm:"foreignKey:ZoneID"`
+	ID               uint           `json:"id" gorm:"primaryKey"`
+	Name             string         `json:"name" gorm:"size:100;not null"`
+	Description      string         `json:"description" gorm:"type:text"`
+	DailyWaterBudget *float64       `json:"daily_water_budget" gorm:"type:decimal(10,2)"` // 每日水量限额（升），NULL 表示不限制
+	CreatedAt        time.Time      `json:"created_at"`
+	UpdatedAt        time.Time      `json:"updated_at"`
+	DeletedAt        gorm.DeletedAt `json:"-" gorm:"index"`
+	Devices          []Device       `json:"devices,omitempty" gorm:"foreignKey:ZoneID"`
 }
 
 type Device struct {
